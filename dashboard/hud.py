@@ -204,12 +204,28 @@ class EdithHUD:
         
         # Scrolled Text Box replaced with styled scroll bubble frame container
         self.chat_canvas = tk.Canvas(chat_container, bg="#050d12", highlightthickness=0, height=80)
-        self.chat_canvas.pack(fill="both", expand=True)
+        
+        # Thin sci-fi scrollbar
+        scrollbar = tk.Scrollbar(chat_container, orient="vertical", command=self.chat_canvas.yview, width=8, bd=0, highlightthickness=0)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.chat_canvas.pack(side="left", fill="both", expand=True)
+        self.chat_canvas.configure(yscrollcommand=scrollbar.set)
         
         self.chat_scroll_frame = tk.Frame(self.chat_canvas, bg="#050d12")
-        self.chat_canvas.create_window((0, 0), window=self.chat_scroll_frame, anchor="nw")
+        self.chat_canvas_window = self.chat_canvas.create_window((0, 0), window=self.chat_scroll_frame, anchor="nw")
         
+        # Configure scrollregion and dynamic width update
         self.chat_scroll_frame.bind("<Configure>", lambda e: self.chat_canvas.configure(scrollregion=self.chat_canvas.bbox("all")))
+        self.chat_canvas.bind("<Configure>", lambda e: self.chat_canvas.itemconfig(self.chat_canvas_window, width=e.width))
+        
+        # Mousewheel scrolling bindings for ease of use
+        def _on_mousewheel(event):
+            try:
+                self.chat_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        self.chat_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         # Input typing field
         input_frame = tk.Frame(chat_container, bg="#050d12")
@@ -386,7 +402,7 @@ class EdithHUD:
 
     def _insert_chat_message(self, sender: str, text: str) -> None:
         children = self.chat_scroll_frame.winfo_children()
-        if len(children) >= 10:
+        if len(children) >= 100:
             children[0].destroy()
             
         bubble = tk.Frame(self.chat_scroll_frame, bg="#050d12")
