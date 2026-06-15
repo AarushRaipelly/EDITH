@@ -8,6 +8,9 @@ class EdithContext:
         self.zero_knowledge_mode: bool = False
         self.dnd_mode: bool = False
         self.whisper_mode: bool = False
+        self.guest_mode: bool = False
+        self.roommate_mode: bool = False
+        self.respond_via_voice: bool = True
         self.active_device: str = "PC"  # "PC" or "Mobile"
         self.boss_tone: str = "normal"  # "stressed", "playful", "work", "normal"
         self.temporary_context: Dict[str, Any] = {}
@@ -36,3 +39,6 @@ class EdithContext:
         self.topic_history = ["general"]
         self.current_topic = "general"
         self.interruption_occurred = False
+        self.guest_mode = False
+        self.roommate_mode = False
+        self.respond_via_voice = True

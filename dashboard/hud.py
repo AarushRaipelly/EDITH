@@ -194,6 +194,10 @@ class EdithHUD:
         self.wave_canvas = tk.Canvas(self.container, bg="#050d12", height=15, highlightthickness=0)
         self.wave_canvas.pack(fill="x", padx=15, pady=2)
 
+        # --- HEARD TEXT BAR ---
+        self.heard_label = tk.Label(self.container, text="HEARD: IDLE", bg="#050d12", fg="#00d4ff", font=(FONT_FAMILY, 8, "italic"), anchor="w")
+        self.heard_label.pack(fill="x", padx=15, pady=2)
+
         # --- CHAT AREA ---
         chat_container = tk.Frame(self.container, bg="#050d12")
         chat_container.pack(fill="both", expand=True, padx=15, pady=5)
@@ -374,8 +378,7 @@ class EdithHUD:
         self.update_queue.put(('recognized_text', text))
 
     def _set_recognized_text(self, text: str) -> None:
-        # We can append it to the chat bubbles or show it on the HUD title
-        pass
+        self.heard_label.config(text=f"HEARD: {text.upper()}")
 
     def add_chat_message(self, sender: str, text: str) -> None:
         """Thread-safe queuing of chat message."""
@@ -525,8 +528,14 @@ class EdithHUD:
             pass
         self.battery_cell.update_stat(f"{bat}%", bat)
 
-        mem = int(self.ram_meter_val)
-        self.mem_cell.update_stat(f"{mem}%", mem)
+        # Real system memory usage
+        mem_pct = 50
+        try:
+            import psutil
+            mem_pct = int(psutil.virtual_memory().percent)
+        except Exception:
+            pass
+        self.mem_cell.update_stat(f"{mem_pct}%", mem_pct)
 
         tasks = 0
         if self.brain and hasattr(self.brain, "tasks"):
@@ -535,7 +544,60 @@ class EdithHUD:
             tasks = int(self.cpu_meter_val / 20)
         self.tasks_cell.update_stat(f"{tasks} Active", min(tasks * 20, 100))
 
-        self.class_cell.update_stat("2h 15m", 40)
+        # Dynamic Next Class countdown from schedule database
+        class_text = "None"
+        class_progress = 0
+        if self.brain and self.brain.memory:
+            try:
+                import datetime
+                now = datetime.datetime.now()
+                day_name = now.strftime("%A").lower()
+                
+                raw_schedule = self.brain.memory.get_all_memories_by_topic("academic_schedule")
+                upcoming_classes = []
+                
+                for key, val in raw_schedule.items():
+                    if key.startswith(day_name):
+                        parts = key.split("_")
+                        if len(parts) >= 2:
+                            time_str = parts[1].replace(":", "")  # remove colon if any, e.g. "09:00" -> "0900"
+                            if len(time_str) == 4 and time_str.isdigit():
+                                hr = int(time_str[:2])
+                                mn = int(time_str[2:])
+                                class_time = now.replace(hour=hr, minute=mn, second=0, microsecond=0)
+                                if class_time > now:
+                                    subject = val.split("|")[0]
+                                    time_diff = class_time - now
+                                    upcoming_classes.append((time_diff, subject))
+                
+                if upcoming_classes:
+                    upcoming_classes.sort(key=lambda x: x[0])
+                    closest_diff, closest_subject = upcoming_classes[0]
+                    total_seconds = int(closest_diff.total_seconds())
+                    hrs = total_seconds // 3600
+                    mins = (total_seconds % 3600) // 60
+                    
+                    if hrs > 0:
+                        class_text = f"{hrs}h {mins}m ({closest_subject})"
+                    else:
+                        class_text = f"{mins}m ({closest_subject})"
+                        
+                    remaining_mins = total_seconds / 60.0
+                    if remaining_mins <= 15:
+                        class_progress = 100
+                    elif remaining_mins >= 240:
+                        class_progress = 0
+                    else:
+                        class_progress = int((240 - remaining_mins) / 225.0 * 100)
+                else:
+                    class_text = "None today"
+                    class_progress = 0
+            except Exception as e:
+                logger.error(f"Error calculating next class countdown: {e}")
+                class_text = "Error"
+                class_progress = 0
+
+        self.class_cell.update_stat(class_text, class_progress)
 
     def _animate_pulse(self) -> None:
         if not self.running or not self.root:

@@ -1,11 +1,15 @@
 import os
 import logging
 from typing import Dict, Any, Optional
+import re
 from config import settings
 from core.memory import EdithMemory
 from core.context import EdithContext
 from core.tasks import EdithTaskManager
 from core.learning import EdithLearningManager
+from voice.language import EdithLanguageManager
+from voice.tone_detector import EdithToneDetector
+from security.safety_gate import SafetyGate
 
 logger = logging.getLogger("EDITH.Core")
 
@@ -15,26 +19,44 @@ class EdithBrain:
         self.context = EdithContext()
         self.tasks = EdithTaskManager()
         self.learning = EdithLearningManager(self.memory)
+        self.language_manager = EdithLanguageManager()
+        self.tone_detector = EdithToneDetector()
+        self.safety_gate = SafetyGate()
         
         # Determine if onboarding has been completed
         self.onboarded = self.memory.get_memory("system", "onboarded") == "True"
+
+        # Start background reminder daemon thread
+        import threading
+        self.reminder_thread = threading.Thread(target=self._run_reminder_daemon, daemon=True)
+        self.reminder_thread.start()
 
     def process_input(self, user_text: str) -> str:
         """Processes user input through safety guards, routing, and conversation rules."""
         if not user_text:
             return ""
 
+        # 0. Detect Tone and Language
+        self.context.boss_tone = self.tone_detector.analyze_lexical_tone(user_text)
+        user_lang = self.language_manager.detect_language(user_text)
+        
+        # Translate Hinglish/Hindi inputs to English for internal routing & safety gates
+        user_text_en = user_text
+        if user_lang in ("hinglish", "hindi"):
+            user_text_en = self.language_manager.translate_to_english(user_text)
+            logger.info(f"Translated input to English: '{user_text_en}'")
+
         # 1. Check Panic Word
         panic_word = self.memory.get_memory("security", "panic_word")
-        if panic_word and (panic_word.lower() in user_text.lower()):
+        if panic_word and (panic_word.lower() in user_text.lower() or panic_word.lower() in user_text_en.lower()):
             from security.panic import trigger_panic
             return trigger_panic(self)
 
         # 2. Check Jailbreak / Injection Attempt
         from security.intrusion import IntrusionDetector
         detector = IntrusionDetector()
-        if detector.detect_injection(user_text):
-            detector.alert_boss(user_text)
+        if detector.detect_injection(user_text_en):
+            detector.alert_boss(user_text_en)
             return "Security violation logged, Boss. Prompt injection attempt detected and blocked."
 
         # 3. Check DND mode
@@ -43,7 +65,7 @@ class EdithBrain:
             is_priority = False
             priority_contacts = self.memory.get_all_memories_by_topic("priority_contacts")
             for contact in priority_contacts.keys():
-                if contact.lower() in user_text.lower():
+                if contact.lower() in user_text_en.lower():
                     is_priority = True
                     break
             if not is_priority:
@@ -53,10 +75,53 @@ class EdithBrain:
         if not self.context.zero_knowledge_mode:
             self.memory.log_dialogue(self.context.session_id, "user", user_text)
 
+        # 4.2 Check Guest and Roommate Mode Switches (Must bypass block check)
+        cleaned_input_en = user_text_en.lower().strip()
+        if "guest mode off" in cleaned_input_en or "deactivate guest" in cleaned_input_en:
+            self.context.guest_mode = False
+            return "Guest mode deactivated. Welcome back, Boss."
+        elif "roommate mode off" in cleaned_input_en or "deactivate roommate" in cleaned_input_en:
+            self.context.roommate_mode = False
+            return "Roommate mode deactivated. Welcome back, Boss."
+
+        # 4.3 Check Guest and Roommate Restrictions
+        if getattr(self.context, "guest_mode", False):
+            from modes.guest import GuestPermissionsManager
+            guest_mgr = GuestPermissionsManager()
+            restricted = True
+            for topic in guest_mgr.whitelisted_topics:
+                if topic in cleaned_input_en:
+                    restricted = False
+                    break
+            if any(w in cleaned_input_en for w in ["hello", "hey", "morning", "weather", "canteen", "timetable", "mess"]):
+                restricted = False
+            if restricted:
+                return "Access denied. Topic or action is restricted in Guest mode, Boss."
+                
+        elif getattr(self.context, "roommate_mode", False):
+            from modes.roommate import RoommateModeManager
+            roommate_mgr = RoommateModeManager()
+            restricted = True
+            for topic in roommate_mgr.whitelisted_topics:
+                if topic in cleaned_input_en:
+                    restricted = False
+                    break
+            if any(w in cleaned_input_en for w in ["hello", "hey", "morning", "weather", "canteen", "timetable", "mess"]):
+                restricted = False
+            if restricted:
+                return "Access denied. Topic or action is restricted in Roommate mode, Boss."
+
         # 4.5 Direct application launcher shortcut
-        cleaned_input = user_text.lower().strip()
-        if cleaned_input.startswith("open ") or cleaned_input.startswith("launch "):
-            app_name = cleaned_input.replace("open ", "").replace("launch ", "").strip()
+        if cleaned_input_en.startswith("open ") or cleaned_input_en.startswith("launch "):
+            app_name = cleaned_input_en.replace("open ", "").replace("launch ", "").strip()
+            
+            # Check safety gate and modes permissions
+            if getattr(self.context, "guest_mode", False) or getattr(self.context, "roommate_mode", False):
+                return "Access denied. Opening apps is restricted in this mode."
+                
+            if not self.safety_gate.is_app_allowed(app_name):
+                return f"Access denied. Application '{app_name}' is not whitelisted, Boss."
+                
             from integrations.browser import BrowserController
             ctrl = BrowserController()
             success = ctrl.open_app(app_name)
@@ -70,10 +135,9 @@ class EdithBrain:
             return response
 
         # 5. Route to appropriate features or utilities
-        response = self._dispatch_routing(user_text)
+        response = self._dispatch_routing(user_text_en)
 
         # 6. Parse and execute LLM structured actions if any
-        import re
         action_match = re.search(r'\[ACTION:\s*(\w+)\s*(.*?)\]', response)
         if action_match:
             action_name = action_match.group(1)
@@ -99,12 +163,22 @@ class EdithBrain:
         # 7. Apply behavior corrections and custom styling
         behavior_rules = self.learning.retrieve_active_rules()
         for pattern, correction in behavior_rules.items():
-            if pattern.lower() in user_text.lower():
+            if pattern.lower() in user_text_en.lower():
                 response += f"\n[Rule applied: {correction}]"
+
+        # Tone adaptation & language formulation
+        if response:
+            if self.context.boss_tone == "stressed":
+                response = f"Take a deep breath, Boss. I've got you covered. {response}"
+            elif self.context.boss_tone == "playful":
+                response = f"Haha, copy that, Boss! {response}"
+            elif self.context.boss_tone == "work":
+                response = f"Copy that, Boss. Focus mode active. {response}"
+                
+            response = self.language_manager.formulate_response(response, user_lang)
 
         # Post-processing: Replace any occurrence of 'Jarvis' or 'jarvis' with 'EDITH'
         if response:
-            import re
             response = re.sub(r'\bJarvis\b', 'EDITH', response, flags=re.IGNORECASE)
 
         # 8. Log response if allowed
@@ -120,6 +194,26 @@ class EdithBrain:
         # Handle onboarding trigger
         if not self.onboarded:
             return "Boss, setup is not complete. Please launch onboarding first."
+
+        # Morning Routine
+        if "good morning" in cleaned or "morning routine" in cleaned or "morning schedule" in cleaned:
+            return self.run_morning_routine()
+
+        # Guest and Roommate Mode Switches
+        if "guest mode on" in cleaned or "activate guest" in cleaned:
+            self.context.guest_mode = True
+            self.context.roommate_mode = False
+            return "Guest mode activated, Boss. Access to personal files and sensitive controls is locked."
+        elif "guest mode off" in cleaned or "deactivate guest" in cleaned:
+            self.context.guest_mode = False
+            return "Guest mode deactivated. Welcome back, Boss."
+        elif "roommate mode on" in cleaned or "activate roommate" in cleaned or "roommate mode" in cleaned:
+            self.context.roommate_mode = True
+            self.context.guest_mode = False
+            return "Roommate mode activated, Boss. Personal systems are locked down."
+        elif "roommate mode off" in cleaned or "deactivate roommate" in cleaned:
+            self.context.roommate_mode = False
+            return "Roommate mode deactivated. Boss profile restored."
 
         # Mode switches
         if "dnd mode on" in cleaned or "activate dnd" in cleaned:
@@ -237,6 +331,28 @@ class EdithBrain:
     def _execute_action(self, name: str, params: dict) -> None:
         """Runs the background code corresponding to structured actions parsed from the LLM."""
         logger.info(f"Executing Agentic Action: {name} with parameters: {params}")
+        
+        # 1. Enforce Safety Gate Whitelists
+        if name == "open_app":
+            app_target = params.get("name") or params.get("app_name", "")
+            if not self.safety_gate.is_app_allowed(app_target):
+                logger.warning(f"SafetyGate: Blocked execution of application '{app_target}'")
+                return
+                
+        # 2. Check Guest/Roommate restrictions on action execution
+        if getattr(self.context, "guest_mode", False):
+            from modes.guest import GuestPermissionsManager
+            guest_mgr = GuestPermissionsManager()
+            if not guest_mgr.is_action_allowed(name):
+                logger.warning(f"GuestMode: Blocked action {name}")
+                return
+        elif getattr(self.context, "roommate_mode", False):
+            from modes.roommate import RoommateModeManager
+            roommate_mgr = RoommateModeManager()
+            if not roommate_mgr.is_action_allowed(name):
+                logger.warning(f"RoommateMode: Blocked action {name}")
+                return
+
         try:
             if name == "add_expense":
                 from features.budget.tracker import StudentBudgetTracker
@@ -342,12 +458,7 @@ class EdithBrain:
                 # 1. Listen for wake word
                 if listener.listen_for_wake_word("Edith, good morning"):
                     # Play a soft double-beep chime
-                    try:
-                        import winsound
-                        winsound.Beep(800, 150)
-                        winsound.Beep(1200, 200)
-                    except Exception as e:
-                        logger.warning(f"Failed to play chime: {e}")
+                    speaker.play_alert("wake")
 
                     speaker.speak("I'm here, Boss.")
                     
@@ -394,6 +505,121 @@ class EdithBrain:
                 time.sleep(0.5)
         except Exception as e:
             logger.error(f"Voice loop error: {e}")
+
+    def run_morning_routine(self) -> str:
+        """Gathers schedule, weather, budget, tasks, and presents a morning overview."""
+        boss_name = self.memory.get_memory("security", "boss_name") or "Boss"
+        greeting = f"Good morning, {boss_name}! EDITH is online and fully tactical.\n"
+        
+        # 1. Weather
+        from integrations.weather import WeatherIntegration
+        weather = WeatherIntegration()
+        weather_info = weather.get_weather("Delhi")
+        
+        # 2. Timetable / Schedule
+        from features.academic.schedule import get_schedule_summary
+        schedule_info = get_schedule_summary(self.memory)
+        
+        # 3. Pending assignments
+        from features.academic.assignments import AssignmentTracker
+        tracker = AssignmentTracker(self.memory)
+        pending = tracker.get_pending_assignments()
+        if pending:
+            assignments_info = f"You have {len(pending)} pending assignments. The next one is due in {pending[0]['days_remaining']} days."
+        else:
+            assignments_info = "No pending assignments due. Great job!"
+            
+        # 4. Battery / Metrics
+        import psutil
+        battery_pct = "100%"
+        try:
+            battery = psutil.sensors_battery()
+            if battery:
+                battery_pct = f"{int(battery.percent)}%"
+        except Exception:
+            pass
+            
+        # 5. Fun / motivational close
+        from features.lifestyle.meme_mode import MemeManager
+        memes = MemeManager()
+        joke = memes.get_random_meme()
+        if joke.startswith("Title:"):
+            joke = "Ready for the day!"
+        
+        response = (
+            f"{greeting}\n"
+            f"🌤️ {weather_info}\n"
+            f"📅 {schedule_info}\n"
+            f"📝 {assignments_info}\n"
+            f"🔋 Battery: {battery_pct} | System: OPTIMAL.\n"
+            f"💡 Dev joke of the day: {joke}\n"
+            f"Have a great day, {boss_name}!"
+        )
+        return response
+
+    def _run_reminder_daemon(self) -> None:
+        """Daemon loop to check and alert for medication, curfew, and mess times."""
+        import time
+        from datetime import datetime
+        
+        logger.info("Background reminders daemon started.")
+        last_checked_minute = -1
+        
+        while True:
+            try:
+                time.sleep(10)
+                
+                # Check DND mode
+                if self.context.dnd_mode:
+                    continue
+                    
+                now = datetime.now()
+                if now.minute == last_checked_minute:
+                    continue
+                last_checked_minute = now.minute
+                
+                current_time_str = now.strftime("%H:%M")
+                
+                # 1. Medication check
+                from features.health.medication import MedicationManager
+                med_mgr = MedicationManager(self.memory)
+                active_meds = med_mgr.get_active_medications()
+                for med in active_meds:
+                    if med["time"] == current_time_str:
+                        alert_msg = f"Alert: Time to take your medication, Boss! Dose of {med['name']} ({med['dose']}) is due now."
+                        self._dispatch_reminder(alert_msg, "breakthrough")
+                
+                # 2. Gate Curfew check (30 mins before gate closing)
+                curfew_hour = settings.HOSTEL_GATE_CURFEW_HOUR
+                if now.hour == curfew_hour - 1 and now.minute == 30:
+                    alert_msg = f"Hostel Curfew Warning, Boss! The main gate closing is in 30 minutes at {curfew_hour}:00."
+                    self._dispatch_reminder(alert_msg, "warning")
+                    
+                # 3. Mess Times check
+                mess_breakfast = settings.MESS_BREAKFAST_TIME
+                mess_lunch = settings.MESS_LUNCH_TIME
+                mess_dinner = settings.MESS_DINNER_TIME
+                
+                if current_time_str == mess_breakfast:
+                    self._dispatch_reminder("Boss, Breakfast is now open at the canteen.", "success")
+                elif current_time_str == mess_lunch:
+                    self._dispatch_reminder("Boss, Lunch is now served at the canteen.", "success")
+                elif current_time_str == mess_dinner:
+                    self._dispatch_reminder("Boss, Dinner is now open at the canteen.", "success")
+                    
+            except Exception as e:
+                logger.error(f"Error in reminders daemon loop: {e}")
+
+    def _dispatch_reminder(self, msg: str, sound_type: str) -> None:
+        from voice.speaker import EdithSpeaker
+        try:
+            if self.hud:
+                self.hud.add_chat_message("System", msg)
+        except Exception:
+            pass
+        speaker = EdithSpeaker(self)
+        speaker.play_alert(sound_type)
+        speaker.speak(msg)
 
     def shutdown(self) -> None:
         """Shuts down background queues and processes."""

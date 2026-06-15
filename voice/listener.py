@@ -175,11 +175,7 @@ class EdithListener:
                     logger.info("Wake word detected!")
                     
                     # Play a soft double-beep chime
-                    try:
-                        winsound.Beep(800, 150)
-                        winsound.Beep(1200, 200)
-                    except Exception as e:
-                        logger.warning(f"Failed to play chime: {e}")
+                    speaker.play_alert("wake")
                         
                     # Say "I'm here, Boss!" out loud
                     speaker.speak("I'm here, Boss!")

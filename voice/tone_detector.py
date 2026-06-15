@@ -9,7 +9,7 @@ class EdithToneDetector:
     def analyze_lexical_tone(self, text: str) -> str:
         """Determines emotional tone from word selection in the transcript."""
         cleaned = text.lower()
-        if any(w in cleaned for w in ["stressed", "anxious", "deadline", "panic", "worry", "hurry", "fast"]):
+        if any(w in cleaned for w in ["stress", "anxious", "deadline", "panic", "worry", "hurry", "fast"]):
             return "stressed"
         elif any(w in cleaned for w in ["playful", "joke", "fun", "haha", "lol", "witty", "game"]):
             return "playful"
