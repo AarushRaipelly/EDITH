@@ -202,6 +202,17 @@ class EdithHUD:
         chat_container = tk.Frame(self.container, bg="#050d12")
         chat_container.pack(fill="both", expand=True, padx=15, pady=5)
         
+        # Input typing field
+        input_frame = tk.Frame(chat_container, bg="#050d12")
+        input_frame.pack(side="bottom", fill="x", pady=(2, 5))
+        
+        self.entry_field = tk.Entry(input_frame, bg="#102027", fg="#CDD6F4", insertbackground="#CDD6F4", font=(FONT_FAMILY, 9), highlightbackground="#1e3b2b", highlightthickness=1)
+        self.entry_field.pack(side="left", fill="x", expand=True, padx=(0, 5), ipady=2)
+        self.entry_field.bind("<Return>", lambda e: self._send_text_message())
+        
+        send_btn = tk.Button(input_frame, text="SEND", bg="#102027", fg="#00d4ff", activebackground="#0b2533", activeforeground="#00d4ff", relief="flat", font=(FONT_FAMILY, 8, "bold"), command=self._send_text_message)
+        send_btn.pack(side="right", padx=1)
+
         # Scrolled Text Box replaced with styled scroll bubble frame container
         self.chat_canvas = tk.Canvas(chat_container, bg="#050d12", highlightthickness=0, height=80)
         
@@ -226,17 +237,6 @@ class EdithHUD:
             except Exception:
                 pass
         self.chat_canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-        # Input typing field
-        input_frame = tk.Frame(chat_container, bg="#050d12")
-        input_frame.pack(fill="x", pady=(2, 5))
-        
-        self.entry_field = tk.Entry(input_frame, bg="#102027", fg="#CDD6F4", insertbackground="#CDD6F4", font=(FONT_FAMILY, 9), highlightbackground="#1e3b2b", highlightthickness=1)
-        self.entry_field.pack(side="left", fill="x", expand=True, padx=(0, 5), ipady=2)
-        self.entry_field.bind("<Return>", lambda e: self._send_text_message())
-        
-        send_btn = tk.Button(input_frame, text="SEND", bg="#102027", fg="#00d4ff", activebackground="#0b2533", activeforeground="#00d4ff", relief="flat", font=(FONT_FAMILY, 8, "bold"), command=self._send_text_message)
-        send_btn.pack(side="right", padx=1)
 
         # --- STATS GRID (2x2) ---
         stats_grid = tk.Frame(self.container, bg="#050d12")
